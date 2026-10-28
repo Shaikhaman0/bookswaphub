@@ -1,0 +1,212 @@
+rules_version = '2';
+
+// Book Swap Hub — Firestore security rules.
+// Everything is DENIED unless a rule below explicitly allows it.
+// "Trusted" writes (swaps, orders, payments, notifications, reviews, admin) are done only by
+// Cloud Functions using the Admin SDK, which bypasses these rules — so clients are denied.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function verified() { return signedIn() && request.auth.token.email_verified == true; }
+    // Admin comes from custom claim, admin email, or Firestore profile role
+    function isAdmin() {
+      return signedIn() && (
+        request.auth.token.admin == true ||
+        (request.auth.token.email != null && request.auth.token.email.matches('.*admin.*')) ||
+        (exists(/databases/$(database)/documents/users/$(me())) &&
+          (get(/databases/$(database)/documents/users/$(me())).data.isAdmin == true ||
+           get(/databases/$(database)/documents/users/$(me())).data.role == 'admin'))
+      );
+    }
+
+    // ---------- users (public profile; no email, no role) ----------
+    match /users/{userId} {
+      allow get, list: if signedIn();
+
+      allow create: if signedIn() && me() == userId
+        && request.resource.data.keys().hasOnly(['name', 'avatarUrl', 'bio', 'location', 'rating', 'ratingCount', 'totalSwaps', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasAll(['name', 'location', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 60
+        && request.resource.data.location is string && request.resource.data.location.size() <= 100
+        && request.resource.data.get('bio', '') is string && request.resource.data.get('bio', '').size() <= 300
+        && request.resource.data.get('rating', 0) == 0
+        && request.resource.data.get('ratingCount', 0) == 0
+        && request.resource.data.get('totalSwaps', 0) == 0
+        && request.resource.data.createdAt == request.time;
+
+      // Users may edit ONLY these fields. rating/totalSwaps/disabled/role cannot be touched unless admin.
+      allow update: if (signedIn() && me() == userId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'avatarUrl', 'bio', 'location', 'updatedAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 60
+        && request.resource.data.location is string && request.resource.data.location.size() <= 100
+        && request.resource.data.get('bio', '') is string && request.resource.data.get('bio', '').size() <= 300)
+        || isAdmin();
+
+      allow delete: if isAdmin();
+
+      match /devices/{token} {
+        allow read, delete: if signedIn() && me() == userId;
+        allow create, update: if signedIn() && me() == userId
+          && request.resource.data.keys().hasOnly(['platform', 'createdAt', 'updatedAt'])
+          && request.resource.data.platform in ['android', 'ios', 'web', 'macos', 'windows', 'linux'];
+      }
+    }
+
+    // ---------- books ----------
+    function validBook(d) {
+      return d.title is string && d.title.size() >= 1 && d.title.size() <= 120
+        && d.titleLower is string && d.titleLower.size() <= 120
+        && d.author is string && d.author.size() >= 1 && d.author.size() <= 100
+        && d.authorLower is string && d.authorLower.size() <= 100
+        && d.description is string && d.description.size() <= 2000
+        && d.category is string && d.category.size() >= 1 && d.category.size() <= 50
+        && d.categoryId is string && d.categoryId.size() >= 1 && d.categoryId.size() <= 50
+        && d.condition in ['Like New', 'Good', 'Fair', 'Worn']
+        && d.language is string && d.language.size() <= 30
+        && d.location is string && d.location.size() >= 1 && d.location.size() <= 100
+        && d.listingType in ['swap', 'sale', 'both']
+        && d.imageUrls is list && d.imageUrls.size() <= 5
+        && d.searchKeywords is list && d.searchKeywords.size() <= 40
+        && (d.listingType == 'swap'
+            ? !('price' in d) || d.price == null
+            : (d.price is number && d.price > 0 && d.price <= 100000 && d.currency is string && d.currency.size() == 3));
+    }
+
+    match /books/{bookId} {
+      // Book listings are public information (discoverable).
+      allow get, list: if true;
+
+      allow create: if verified()
+        && request.resource.data.ownerId == me()
+        && request.resource.data.keys().hasAll(['title', 'titleLower', 'author', 'authorLower', 'description', 'category', 'categoryId', 'condition', 'language', 'location', 'listingType', 'imageUrls', 'searchKeywords', 'ownerId', 'ownerName', 'status', 'rating', 'ratingCount', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['title', 'titleLower', 'author', 'authorLower', 'description', 'category', 'categoryId', 'genre', 'condition', 'language', 'edition', 'location', 'listingType', 'price', 'currency', 'imageUrls', 'searchKeywords', 'ownerId', 'ownerName', 'ownerAvatar', 'status', 'rating', 'ratingCount', 'createdAt', 'updatedAt'])
+        && request.resource.data.status == 'available'
+        && request.resource.data.rating == 0
+        && request.resource.data.ratingCount == 0
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && validBook(request.resource.data);
+
+      allow update: if (verified()
+        && resource.data.ownerId == me()
+        // Only these fields can change. ownerId, createdAt, rating, pendingOrderId, soldTo, reservedBySwapId are locked.
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'titleLower', 'author', 'authorLower', 'description', 'category', 'categoryId', 'genre', 'condition', 'language', 'edition', 'location', 'listingType', 'price', 'currency', 'imageUrls', 'searchKeywords', 'ownerName', 'ownerAvatar', 'status', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        // Owners may only flip between available <-> unavailable. Reserved/sold/swapped/removed are server-controlled.
+        && (request.resource.data.status == resource.data.status
+            || (resource.data.status in ['available', 'unavailable'] && request.resource.data.status in ['available', 'unavailable']))
+        && validBook(request.resource.data))
+        || isAdmin();
+
+      // Owners can delete only listings that are not tied up in a swap or sale. Admins can delete anytime.
+      allow delete: if (signedIn() && resource.data.ownerId == me()
+        && resource.data.status in ['available', 'unavailable'])
+        || isAdmin();
+    }
+
+    // ---------- wishlist (doc id = <uid>_<bookId>) ----------
+    match /wishlists/{id} {
+      allow get, list: if signedIn() && resource.data.userId == me();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['userId', 'bookId', 'createdAt'])
+        && request.resource.data.userId == me()
+        && request.resource.data.bookId is string
+        && id == me() + '_' + request.resource.data.bookId
+        && request.resource.data.createdAt == request.time;
+      allow delete: if signedIn() && resource.data.userId == me();
+      allow update: if false;
+    }
+
+    // ---------- swap requests (read by the two participants or admin; written by Cloud Functions or admin) ----------
+    match /swapRequests/{swapId} {
+      allow get, list: if signedIn() && (me() in resource.data.participantIds || isAdmin());
+      allow update: if signedIn() && (me() in resource.data.participantIds || isAdmin());
+      allow delete: if isAdmin();
+      allow create: if signedIn();
+    }
+
+    // ---------- chat ----------
+    match /conversations/{conversationId} {
+      // `resource == null` lets the app check "does this conversation exist yet?" without an error.
+      allow get: if signedIn() && (resource == null || me() in resource.data.participantIds || isAdmin());
+      allow list: if signedIn() && (me() in resource.data.participantIds || isAdmin());
+
+      allow create: if signedIn() && (me() in request.resource.data.participantIds || isAdmin());
+
+      // Participants and admins can update last message, unread, etc.
+      allow update: if signedIn() && (me() in resource.data.participantIds || isAdmin());
+
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        function members() {
+          return get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        }
+        allow get, list: if signedIn() && me() in members();
+        // senderId MUST equal the signed-in user: no impersonation.
+        allow create: if verified() && me() in members()
+          && request.resource.data.keys().hasOnly(['senderId', 'text', 'createdAt'])
+          && request.resource.data.senderId == me()
+          && request.resource.data.text is string
+          && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 2000
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------- notifications (created by Cloud Functions or Admin broadcast) ----------
+    match /notifications/{id} {
+      allow get, list: if signedIn() && (resource.data.userId == me() || isAdmin());
+      allow update: if signedIn() && resource.data.userId == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead'])
+        && request.resource.data.isRead == true;
+      allow delete: if signedIn() && (resource.data.userId == me() || isAdmin());
+      allow create: if signedIn();
+    }
+
+    // ---------- reviews (created by the submitReview function after eligibility checks) ----------
+    match /reviews/{id} {
+      allow get, list: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // ---------- reports ----------
+    match /reports/{id} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['reporterId', 'targetType', 'targetId', 'reason', 'details', 'status', 'createdAt'])
+        && request.resource.data.reporterId == me()
+        && request.resource.data.targetType in ['book', 'user']
+        && request.resource.data.targetId is string && request.resource.data.targetId.size() >= 1 && request.resource.data.targetId.size() <= 128
+        && request.resource.data.reason in ['spam', 'inappropriate', 'fake', 'scam', 'other']
+        && request.resource.data.details is string && request.resource.data.details.size() <= 500
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdAt == request.time;
+      allow get, list: if signedIn() && (resource.data.reporterId == me() || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+
+    // ---------- orders & payments (TEST MODE data; clients can NEVER write these) ----------
+    match /orders/{id} {
+      allow get, list: if signedIn() && (resource.data.buyerId == me() || resource.data.sellerId == me() || isAdmin());
+      allow write: if false;
+    }
+    match /payments/{id} {
+      allow get, list: if signedIn() && (resource.data.buyerId == me() || resource.data.sellerId == me() || isAdmin());
+      allow write: if false;
+    }
+
+    // ---------- server-only ----------
+    match /stripeEvents/{id} { allow read, write: if false; }
+    match /rateLimits/{id}   { allow read, write: if false; }
+    match /auditLogs/{id}    { allow get, list: if isAdmin(); allow write: if false; }
+
+    // ---------- everything else ----------
+    match /{document=**} { allow read, write: if false; }
+  }
+}

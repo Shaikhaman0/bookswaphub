@@ -1,0 +1,30 @@
+rules_version = '2';
+
+// Book Swap Hub — Firebase Storage rules. Default: deny.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Book cover photos: public to view, only the owner can upload/delete in their own folder.
+    match /books/{userId}/{fileName} {
+      allow read: if true;
+      allow create, update: if request.auth != null && request.auth.uid == userId
+        && request.auth.token.email_verified == true
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Profile photos.
+    match /avatars/{userId}/{fileName} {
+      allow read: if true;
+      allow create, update: if request.auth != null && request.auth.uid == userId
+        && request.resource.size < 2 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

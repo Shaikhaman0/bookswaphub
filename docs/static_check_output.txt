@@ -1,0 +1,2 @@
+checked 77 Dart files
+OK: no static problems found
