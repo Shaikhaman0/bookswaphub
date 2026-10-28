@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "bookswaphub (Test Mode)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "args": [
+        "--dart-define=STRIPE_PUBLISHABLE_KEY=pk_test_51R6GLPFSZDmdoQ1j80qMGtkcUC8f9jOYQ3gUE2tVa6kZu1t7wVqT3W1NkanUgiawSQO5FRzbyGyDXnMBc6cWye5d00BwjmkI0e"
+      ]
+    }
+  ]
+}
