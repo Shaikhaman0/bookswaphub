@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Miscellaneous
 *.class
 *.log
@@ -62,3 +63,13 @@ rules-tests/node_modules/
 firebase-debug.log
 firestore-debug.log
 ui-debug.log
+=======
+node_modules/
+lib/
+*.log
+.env
+.env.*
+!.env.example
+.secret.local
+serviceAccount*.json
+>>>>>>> origin/master
